@@ -15,7 +15,7 @@ use crate::app::AppState;
 const ONBOARDING_PREFIX_LABEL: &str = "ctrl+b";
 
 pub(super) fn render_onboarding_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
-    super::dim_background(frame, area);
+    super::dim_background(frame, area, app.view.tab_bar_rect);
     render_onboarding_welcome(app, frame, area);
 }
 

@@ -24,7 +24,7 @@ pub(super) fn render_release_notes_overlay(app: &AppState, frame: &mut Frame, ar
         return;
     };
 
-    super::dim_background(frame, area);
+    super::dim_background(frame, area, app.view.tab_bar_rect);
 
     let Some(inner) = render_modal_shell(
         frame,
@@ -139,7 +139,7 @@ pub(super) fn render_product_announcement_overlay(app: &AppState, frame: &mut Fr
         return;
     };
 
-    super::dim_background(frame, area);
+    super::dim_background(frame, area, app.view.tab_bar_rect);
 
     let Some(inner) = render_modal_shell(
         frame,

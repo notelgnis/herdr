@@ -222,7 +222,7 @@ pub(crate) fn keybind_help_lines(app: &AppState) -> Vec<(usize, Line<'static>)> 
 }
 
 pub(super) fn render_keybind_help_overlay(app: &AppState, frame: &mut Frame) {
-    super::dim_background(frame, frame.area());
+    super::dim_background(frame, frame.area(), app.view.tab_bar_rect);
 
     let Some(inner) = render_modal_shell(frame, frame.area(), 76, 22, &app.palette) else {
         return;

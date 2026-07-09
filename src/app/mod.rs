@@ -272,7 +272,29 @@ fn sibling_theme_names(name: &str) -> (String, String) {
         "rose-pine" | "rosepine" | "rose-pine-dawn" | "rosepine-dawn" | "dawn" => {
             ("rose-pine".to_string(), "rose-pine-dawn".to_string())
         }
+        "telemetry" | "my-light" | "mylight" => ("telemetry".to_string(), "my-light".to_string()),
         _ => (name.to_string(), name.to_string()),
+    }
+}
+
+fn optional_color(s: &str) -> Option<ratatui::style::Color> {
+    let s = s.trim();
+    (!s.is_empty()).then(|| crate::config::parse_color(s))
+}
+
+fn resolve_tab_chrome(ui: &crate::config::UiConfig) -> state::TabChromeStyle {
+    state::TabChromeStyle {
+        left_cap: ui.tabs.left_cap.clone(),
+        right_cap: ui.tabs.right_cap.clone(),
+    }
+}
+
+fn resolve_chrome_colors(cfg: &crate::config::ChromeColorsConfig) -> state::ChromeColors {
+    state::ChromeColors {
+        tab_active_fg: optional_color(&cfg.tab_active_fg),
+        tab_active_bg: optional_color(&cfg.tab_active_bg),
+        border_active: optional_color(&cfg.border_active_color),
+        border_inactive: optional_color(&cfg.border_inactive_color),
     }
 }
 
@@ -609,6 +631,10 @@ impl App {
             pane_borders: config.ui.pane_borders,
             pane_gaps: config.ui.pane_gaps,
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
+            border_style: config.ui.border_style,
+            tab_chrome: resolve_tab_chrome(&config.ui),
+            chrome_dark: resolve_chrome_colors(&config.ui.dark),
+            chrome_light: resolve_chrome_colors(&config.ui.light),
             hide_tab_bar_when_single_tab: config.ui.hide_tab_bar_when_single_tab,
             pane_history_persistence: config.experimental.pane_history,
             reveal_hidden_cursor_for_cjk_ime: config.experimental.reveal_hidden_cursor_for_cjk_ime,
@@ -1383,6 +1409,10 @@ impl App {
                 self.state.pane_gaps = config.ui.pane_gaps;
                 self.state.show_agent_labels_on_pane_borders =
                     config.ui.show_agent_labels_on_pane_borders;
+                self.state.border_style = config.ui.border_style;
+                self.state.tab_chrome = resolve_tab_chrome(&config.ui);
+                self.state.chrome_dark = resolve_chrome_colors(&config.ui.dark);
+                self.state.chrome_light = resolve_chrome_colors(&config.ui.light);
                 self.state.hide_tab_bar_when_single_tab = config.ui.hide_tab_bar_when_single_tab;
                 self.state.agent_panel_sort =
                     agent_panel_sort_from_config(config.ui.agent_panel_sort);

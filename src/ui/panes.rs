@@ -387,16 +387,17 @@ fn render_pane_borders(app: &AppState, ws: &crate::workspace::Workspace, frame: 
             .pane_infos
             .iter()
             .any(|info| info.is_focused && line_touches_pane(x, y, info, app.pane_gaps));
-        let symbol = line_cell_symbol(line);
+        let symbol = line_cell_symbol(line, app.border_style);
         if symbol.is_empty() {
             continue;
         }
         let cell = &mut buf[(x, y)];
         cell.set_symbol(symbol);
+        let chrome = app.chrome_colors();
         let color = if focused {
-            app.palette.accent
+            chrome.border_active.unwrap_or(app.palette.accent)
         } else {
-            app.palette.overlay0
+            chrome.border_inactive.unwrap_or(app.palette.overlay0)
         };
         cell.set_style(Style::default().fg(color));
     }
@@ -554,10 +555,11 @@ fn render_pane_border_titles(app: &AppState, ws: &crate::workspace::Workspace, f
         if start_x >= end_x {
             continue;
         }
+        let chrome = app.chrome_colors();
         let color = if info.is_focused {
-            app.palette.accent
+            chrome.border_active.unwrap_or(app.palette.accent)
         } else {
-            app.palette.overlay0
+            chrome.border_inactive.unwrap_or(app.palette.overlay0)
         };
         let mut style = Style::default().fg(color);
         if info.is_focused {
@@ -573,7 +575,8 @@ fn render_pane_border_titles(app: &AppState, ws: &crate::workspace::Workspace, f
     }
 }
 
-fn line_cell_symbol(line: LineCell) -> &'static str {
+fn line_cell_symbol(line: LineCell, style: crate::config::BorderStyle) -> &'static str {
+    let rounded = matches!(style, crate::config::BorderStyle::Rounded);
     match (line.up, line.down, line.left, line.right) {
         (true, true, true, true) => "┼",
         (true, true, true, false) => "┤",
@@ -586,10 +589,37 @@ fn line_cell_symbol(line: LineCell) -> &'static str {
         (false, false, true, true) | (false, false, true, false) | (false, false, false, true) => {
             "─"
         }
-        (false, true, false, true) => "┌",
-        (false, true, true, false) => "┐",
-        (true, false, false, true) => "└",
-        (true, false, true, false) => "┘",
+        // Only the four pure two-way corners have rounded equivalents; the
+        // T/cross junctions above have no rounded Unicode glyphs, so they stay
+        // square regardless of style.
+        (false, true, false, true) => {
+            if rounded {
+                "╭"
+            } else {
+                "┌"
+            }
+        }
+        (false, true, true, false) => {
+            if rounded {
+                "╮"
+            } else {
+                "┐"
+            }
+        }
+        (true, false, false, true) => {
+            if rounded {
+                "╰"
+            } else {
+                "└"
+            }
+        }
+        (true, false, true, false) => {
+            if rounded {
+                "╯"
+            } else {
+                "┘"
+            }
+        }
         _ => "",
     }
 }
@@ -788,6 +818,48 @@ mod tests {
     use crate::terminal::TerminalRuntime;
     use crate::terminal::TerminalState;
     use crate::workspace::Workspace;
+
+    #[test]
+    fn rounded_border_corners() {
+        use crate::config::BorderStyle;
+        let corner = |up, down, left, right| LineCell {
+            up,
+            down,
+            left,
+            right,
+        };
+        // Pure two-way corners become rounded.
+        assert_eq!(
+            line_cell_symbol(corner(false, true, false, true), BorderStyle::Rounded),
+            "╭"
+        );
+        assert_eq!(
+            line_cell_symbol(corner(false, true, true, false), BorderStyle::Rounded),
+            "╮"
+        );
+        assert_eq!(
+            line_cell_symbol(corner(true, false, false, true), BorderStyle::Rounded),
+            "╰"
+        );
+        assert_eq!(
+            line_cell_symbol(corner(true, false, true, false), BorderStyle::Rounded),
+            "╯"
+        );
+        // Square style is unchanged.
+        assert_eq!(
+            line_cell_symbol(corner(false, true, false, true), BorderStyle::Square),
+            "┌"
+        );
+        // Junctions and straights never round.
+        assert_eq!(
+            line_cell_symbol(corner(true, true, true, true), BorderStyle::Rounded),
+            "┼"
+        );
+        assert_eq!(
+            line_cell_symbol(corner(false, false, true, true), BorderStyle::Rounded),
+            "─"
+        );
+    }
 
     #[test]
     fn pane_border_title_trims_and_truncates() {

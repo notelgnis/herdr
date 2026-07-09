@@ -321,25 +321,59 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
             continue;
         }
         let active = idx == ws.active_tab;
-        let style = if active {
-            let base = Style::default().fg(panel_contrast_fg(p)).bg(p.accent);
-            if tab.is_auto_named() {
-                base
-            } else {
-                base.add_modifier(Modifier::BOLD)
-            }
+        let tc = &app.tab_chrome;
+        let chrome = app.chrome_colors();
+        // Per-state pill colors: bg = pill fill, fg = label text. No DIM modifier:
+        // caps draw the pill color as *foreground* while the body uses it as
+        // *background*, and DIM (ANSI faint) only affects foregrounds — so DIM
+        // would fade the caps but not the body. De-emphasis is by color instead
+        // (auto-named tabs use the dimmer overlay0 text, custom use overlay1).
+        let (bg, fg, bold) = if active {
+            (
+                chrome.tab_active_bg.unwrap_or(p.accent),
+                chrome.tab_active_fg.unwrap_or_else(|| panel_contrast_fg(p)),
+                !tab.is_auto_named(),
+            )
         } else if tab.is_auto_named() {
-            Style::default()
-                .fg(p.overlay0)
-                .bg(p.surface0)
-                .add_modifier(Modifier::DIM)
+            (p.surface0, p.overlay0, false)
         } else {
-            Style::default().fg(p.overlay1).bg(p.surface0)
+            (p.surface0, p.overlay1, false)
         };
-        let width = rect.width as usize;
-        let name = tab_chrome_label(ws, idx);
-        let text = format!(" {:width$}", name, width = width.saturating_sub(1));
-        frame.render_widget(Paragraph::new(text).style(style), rect);
+        let has_caps = rect.width >= 3 && !tc.left_cap.is_empty() && !tc.right_cap.is_empty();
+        if has_caps {
+            // Rounded "pill" for every tab: caps painted in the pill fill color
+            // over the bar background, label painted on the fill color. Inactive
+            // tabs use a dim surface fill so the active tab still stands out.
+            let cap_style = Style::default().fg(bg).bg(p.panel_bg);
+            let mut label_style = Style::default().fg(fg).bg(bg);
+            if bold {
+                label_style = label_style.add_modifier(Modifier::BOLD);
+            }
+            let inner = rect.width.saturating_sub(2) as usize;
+            let name = tab_chrome_label(ws, idx);
+            let label = format!(" {:<width$}", name, width = inner.saturating_sub(1));
+            frame.render_widget(
+                Paragraph::new(tc.left_cap.clone()).style(cap_style),
+                Rect::new(rect.x, rect.y, 1, 1),
+            );
+            frame.render_widget(
+                Paragraph::new(label).style(label_style),
+                Rect::new(rect.x + 1, rect.y, rect.width - 2, 1),
+            );
+            frame.render_widget(
+                Paragraph::new(tc.right_cap.clone()).style(cap_style),
+                Rect::new(rect.x + rect.width - 1, rect.y, 1, 1),
+            );
+        } else {
+            let mut style = Style::default().fg(fg).bg(bg);
+            if bold {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            let width = rect.width as usize;
+            let name = tab_chrome_label(ws, idx);
+            let text = format!(" {:width$}", name, width = width.saturating_sub(1));
+            frame.render_widget(Paragraph::new(text).style(style), rect);
+        }
     }
 
     if let Some(crate::app::state::DragState {
@@ -503,5 +537,75 @@ mod tests {
 
         let row = buffer_row_text(terminal.backend().buffer(), app.view.tab_bar_rect, 0);
         assert!(row.contains('馈'), "tab row: {row:?}");
+    }
+
+    #[test]
+    fn active_tab_has_rounded_caps() {
+        let mut app = AppState::test_new();
+        app.tab_chrome = crate::app::state::TabChromeStyle {
+            left_cap: "\u{10FF00}".into(),
+            right_cap: "\u{10FF01}".into(),
+        };
+        app.chrome_dark = crate::app::state::ChromeColors {
+            tab_active_fg: Some(ratatui::style::Color::Rgb(0xb2, 0x22, 0x22)),
+            tab_active_bg: Some(ratatui::style::Color::Rgb(0x65, 0x73, 0x7e)),
+            ..Default::default()
+        };
+        let ws = Workspace::test_new("test");
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        app.view.tab_bar_rect = Rect::new(0, 0, 30, 1);
+        let view = compute_tab_bar_view(&app.workspaces[0], app.view.tab_bar_rect, 0, true, false);
+        app.view.tab_hit_areas = view.tab_hit_areas;
+
+        let backend = TestBackend::new(30, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_tab_bar(&app, frame, app.view.tab_bar_rect))
+            .unwrap();
+
+        let tab_rect = app.view.tab_hit_areas[0];
+        let buf = terminal.backend().buffer();
+        assert_eq!(buf[(tab_rect.x, tab_rect.y)].symbol(), "\u{10FF00}");
+        assert_eq!(
+            buf[(tab_rect.x + tab_rect.width - 1, tab_rect.y)].symbol(),
+            "\u{10FF01}"
+        );
+        // The left cap carries the pill fill color.
+        assert_eq!(
+            buf[(tab_rect.x, tab_rect.y)].style().fg,
+            Some(ratatui::style::Color::Rgb(0x65, 0x73, 0x7e))
+        );
+    }
+
+    #[test]
+    fn inactive_tab_also_has_rounded_caps() {
+        let mut app = AppState::test_new();
+        app.tab_chrome = crate::app::state::TabChromeStyle {
+            left_cap: "\u{10FF00}".into(),
+            right_cap: "\u{10FF01}".into(),
+        };
+        let mut ws = Workspace::test_new("test");
+        ws.test_add_tab(None); // second, inactive tab (active stays 0)
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        app.view.tab_bar_rect = Rect::new(0, 0, 40, 1);
+        let view = compute_tab_bar_view(&app.workspaces[0], app.view.tab_bar_rect, 0, true, false);
+        app.view.tab_hit_areas = view.tab_hit_areas;
+
+        let backend = TestBackend::new(40, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_tab_bar(&app, frame, app.view.tab_bar_rect))
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        let inactive = app.view.tab_hit_areas[1];
+        assert!(inactive.width >= 3, "inactive tab too narrow to cap");
+        assert_eq!(buf[(inactive.x, inactive.y)].symbol(), "\u{10FF00}");
+        assert_eq!(
+            buf[(inactive.x + inactive.width - 1, inactive.y)].symbol(),
+            "\u{10FF01}"
+        );
     }
 }

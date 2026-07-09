@@ -772,6 +772,52 @@ pub struct WorktreesConfig {
     pub directory: String,
 }
 
+/// Pane border corner style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum BorderStyle {
+    /// Square corners (┌┐└┘).
+    Square,
+    /// Rounded corners (╭╮╰╯).
+    #[default]
+    Rounded,
+}
+
+/// Active-tab caps (font glyphs; theme-independent).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct TabsConfig {
+    /// Left cap glyph drawn before the active tab label. Empty disables caps.
+    pub left_cap: String,
+    /// Right cap glyph drawn after the active tab label. Empty disables caps.
+    pub right_cap: String,
+}
+
+impl Default for TabsConfig {
+    fn default() -> Self {
+        Self {
+            left_cap: "\u{10FF00}".into(),
+            right_cap: "\u{10FF01}".into(),
+        }
+    }
+}
+
+/// Appearance-specific chrome colors (active-tab pill + pane borders). One block
+/// per light/dark mode so the look switches with the theme. Empty string means
+/// "derive from the active theme palette".
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ChromeColorsConfig {
+    /// Active-tab text color (hex/rgb/named).
+    pub tab_active_fg: String,
+    /// Active-tab pill fill color (hex/rgb/named).
+    pub tab_active_bg: String,
+    /// Focused pane border color (hex/rgb/named).
+    pub border_active_color: String,
+    /// Unfocused pane border color (hex/rgb/named).
+    pub border_inactive_color: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
@@ -804,6 +850,14 @@ pub struct UiConfig {
     pub pane_gaps: bool,
     /// Show agent labels in split pane borders when no manual pane label is set. Default: false.
     pub show_agent_labels_on_pane_borders: bool,
+    /// Pane border corner style: "square" or "rounded". Default: rounded.
+    pub border_style: BorderStyle,
+    /// Active-tab caps (glyphs; theme-independent).
+    pub tabs: TabsConfig,
+    /// Chrome colors (tab pill + pane borders) used when the terminal is dark.
+    pub dark: ChromeColorsConfig,
+    /// Chrome colors (tab pill + pane borders) used when the terminal is light.
+    pub light: ChromeColorsConfig,
     /// Hide the tab row when the workspace has one tab. Default: false.
     pub hide_tab_bar_when_single_tab: bool,
     /// Agent sidebar ordering. Saved values are "spaces" or "priority". Default: "spaces".
@@ -998,6 +1052,20 @@ impl Default for UiConfig {
             pane_borders: true,
             pane_gaps: true,
             show_agent_labels_on_pane_borders: false,
+            border_style: BorderStyle::Rounded,
+            tabs: TabsConfig::default(),
+            dark: ChromeColorsConfig {
+                tab_active_fg: "#202032".into(),
+                tab_active_bg: "#65737e".into(),
+                border_active_color: "#6b7885".into(),
+                border_inactive_color: "#333b45".into(),
+            },
+            light: ChromeColorsConfig {
+                tab_active_fg: "#e7e7e7".into(),
+                tab_active_bg: "#474757".into(),
+                border_active_color: "#888888".into(),
+                border_inactive_color: "#c3c3c3".into(),
+            },
             hide_tab_bar_when_single_tab: false,
             agent_panel_sort: AgentPanelSortConfig::Spaces,
             accent: "cyan".into(),

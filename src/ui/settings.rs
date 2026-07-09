@@ -41,7 +41,7 @@ pub(super) fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: R
         return;
     };
 
-    super::dim_background(frame, area);
+    super::dim_background(frame, area, app.view.tab_bar_rect);
 
     let Some(inner) = render_panel_shell(frame, popup, p.accent, p.panel_bg) else {
         return;

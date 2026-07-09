@@ -40,7 +40,7 @@ pub(crate) fn rename_button_rects(inner: Rect) -> (Rect, Rect, Rect) {
 }
 
 pub(super) fn render_rename_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
-    super::dim_background(frame, area);
+    super::dim_background(frame, area, app.view.tab_bar_rect);
 
     let title = match app.mode {
         Mode::RenameWorkspace => "rename workspace",
@@ -232,7 +232,7 @@ pub(super) fn render_new_linked_worktree_overlay(app: &AppState, frame: &mut Fra
         return;
     };
 
-    super::dim_background(frame, area);
+    super::dim_background(frame, area, app.view.tab_bar_rect);
     let Some(inner) = render_modal_shell(
         frame,
         area,
@@ -327,7 +327,7 @@ pub(super) fn render_remove_worktree_overlay(app: &AppState, frame: &mut Frame, 
         return;
     };
 
-    super::dim_background(frame, area);
+    super::dim_background(frame, area, app.view.tab_bar_rect);
     let Some(popup) = remove_worktree_popup_rect(area) else {
         return;
     };
@@ -424,7 +424,7 @@ pub(super) fn render_open_existing_worktree_overlay(app: &AppState, frame: &mut 
         return;
     };
 
-    super::dim_background(frame, area);
+    super::dim_background(frame, area, app.view.tab_bar_rect);
     let height = (open.entries.len() as u16)
         .saturating_mul(2)
         .saturating_add(7)
@@ -661,7 +661,7 @@ fn confirm_close_overlay_text(app: &AppState) -> (String, String) {
 pub(super) fn render_confirm_close_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
     let (title, detail) = confirm_close_overlay_text(app);
 
-    super::dim_background(frame, area);
+    super::dim_background(frame, area, app.view.tab_bar_rect);
 
     let Some(popup) = confirm_close_popup_rect(area) else {
         return;

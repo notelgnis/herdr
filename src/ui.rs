@@ -540,10 +540,20 @@ fn rects_overlap(a: Rect, b: Rect) -> bool {
         && b.y < a.y.saturating_add(a.height)
 }
 
-fn dim_background(frame: &mut Frame, area: Rect) {
+fn dim_background(frame: &mut Frame, area: Rect, exclude: Rect) {
     let buf = frame.buffer_mut();
     for y in area.y..area.y + area.height {
         for x in area.x..area.x + area.width {
+            // Skip the tab bar: Modifier::DIM only fades foregrounds, and a tab
+            // pill uses one color as both its caps (fg) and body (bg), so dimming
+            // it splits the pill into two tones. Keep the tab bar fully lit.
+            let in_exclude = x >= exclude.x
+                && x < exclude.x.saturating_add(exclude.width)
+                && y >= exclude.y
+                && y < exclude.y.saturating_add(exclude.height);
+            if in_exclude {
+                continue;
+            }
             let cell = &mut buf[(x, y)];
             cell.set_style(cell.style().add_modifier(Modifier::DIM));
         }
@@ -1014,8 +1024,10 @@ mod tests {
         let auto_style = buffer[(auto_rect.x + 1, auto_rect.y)].style();
         let custom_style = buffer[(custom_rect.x + 1, custom_rect.y)].style();
 
+        // Auto-named tabs are de-emphasized by color (the dimmer overlay0 text),
+        // not the DIM modifier: DIM only fades foregrounds, which would split a
+        // tab pill's caps (pill color as fg) from its body (pill color as bg).
         assert_eq!(auto_style.fg, Some(app.palette.overlay0));
-        assert!(auto_style.add_modifier.contains(Modifier::DIM));
         assert_eq!(custom_style.fg, Some(app.palette.panel_bg));
         assert!(custom_style.add_modifier.contains(Modifier::BOLD));
     }

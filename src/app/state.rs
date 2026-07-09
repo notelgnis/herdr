@@ -489,6 +489,50 @@ impl Palette {
         }
     }
 
+    /// Telemetry — dark teal (matches the author's Ghostty/zellij `Telemetry`).
+    pub fn telemetry() -> Self {
+        Self {
+            accent: Color::Rgb(244, 174, 89),    // #F4AE59 orange-peach
+            panel_bg: Color::Rgb(34, 42, 50),    // #222a32
+            surface0: Color::Rgb(43, 53, 63),    // #2b353f
+            surface1: Color::Rgb(70, 81, 92),    // #46515c
+            surface_dim: Color::Rgb(27, 35, 43), // #1b232b
+            overlay0: Color::Rgb(107, 141, 148), // #6b8d94
+            overlay1: Color::Rgb(147, 191, 194), // #93bfc2
+            text: Color::Rgb(192, 197, 206),     // #c0c5ce
+            subtext0: Color::Rgb(127, 154, 160), // #7f9aa0
+            mauve: Color::Rgb(224, 151, 133),    // #e09785
+            green: Color::Rgb(141, 172, 139),    // #8dac8b
+            yellow: Color::Rgb(244, 174, 89),    // #F4AE59
+            red: Color::Rgb(194, 113, 102),      // #c27166
+            blue: Color::Rgb(147, 191, 194),     // #93bfc2
+            teal: Color::Rgb(165, 207, 205),     // #a5cfcd
+            peach: Color::Rgb(223, 172, 165),    // #dfaca5
+        }
+    }
+
+    /// MyLightTheme — light grey (matches the author's Ghostty/zellij light).
+    pub fn my_light() -> Self {
+        Self {
+            accent: Color::Rgb(0, 142, 196),        // #008ec4 blue
+            panel_bg: Color::Rgb(238, 238, 238),    // #eeeeee
+            surface0: Color::Rgb(226, 226, 226),    // #e2e2e2
+            surface1: Color::Rgb(214, 214, 214),    // #d6d6d6
+            surface_dim: Color::Rgb(231, 231, 231), // #e7e7e7
+            overlay0: Color::Rgb(120, 120, 120),    // #787878
+            overlay1: Color::Rgb(90, 90, 90),       // #5a5a5a
+            text: Color::Rgb(66, 66, 66),           // #424242
+            subtext0: Color::Rgb(106, 106, 106),    // #6a6a6a
+            mauve: Color::Rgb(82, 60, 121),         // #523c79
+            green: Color::Rgb(95, 159, 131),        // #5f9f83
+            yellow: Color::Rgb(168, 156, 20),       // #a89c14
+            red: Color::Rgb(195, 7, 113),           // #c30771
+            blue: Color::Rgb(0, 142, 196),          // #008ec4
+            teal: Color::Rgb(105, 170, 180),        // #69aab4
+            peach: Color::Rgb(203, 123, 58),        // #cb7b3a
+        }
+    }
+
     /// Resolve a theme by name. Returns None for unknown names.
     pub fn from_name(name: &str) -> Option<Self> {
         match name.to_lowercase().replace([' ', '_'], "-").as_str() {
@@ -510,6 +554,8 @@ impl Palette {
             "rose-pine" | "rosepine" => Some(Self::rose_pine()),
             "rose-pine-dawn" | "rosepine-dawn" | "dawn" => Some(Self::rose_pine_dawn()),
             "vesper" => Some(Self::vesper()),
+            "telemetry" => Some(Self::telemetry()),
+            "my-light" | "mylight" => Some(Self::my_light()),
             _ => None,
         }
     }
@@ -951,6 +997,8 @@ pub const THEME_NAMES: &[&str] = &[
     "rose-pine",
     "rose-pine-dawn",
     "vesper",
+    "telemetry",
+    "my-light",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1288,6 +1336,36 @@ pub(crate) struct PaneFocusTarget {
     pub pane_id: PaneId,
 }
 
+/// Resolved active-tab caps projected from `[ui.tabs]`. Empty caps fall back to
+/// the plain (capless) tab rendering.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TabChromeStyle {
+    pub left_cap: String,
+    pub right_cap: String,
+}
+
+/// Resolved chrome colors (active-tab pill + pane borders) for one appearance,
+/// projected from `[ui.dark]` / `[ui.light]`. `None` fields fall back to
+/// palette-derived defaults at render time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ChromeColors {
+    pub tab_active_fg: Option<Color>,
+    pub tab_active_bg: Option<Color>,
+    pub border_active: Option<Color>,
+    pub border_inactive: Option<Color>,
+}
+
+impl AppState {
+    /// Chrome colors resolved for the current terminal appearance (dark/light).
+    /// Falls back to the dark set when the appearance is not yet known.
+    pub fn chrome_colors(&self) -> ChromeColors {
+        match self.host_terminal_appearance {
+            Some(crate::terminal_theme::HostAppearance::Light) => self.chrome_light,
+            _ => self.chrome_dark,
+        }
+    }
+}
+
 /// All application state — pure data, no channels or async runtime.
 /// Testable without PTYs or a tokio runtime.
 pub struct AppState {
@@ -1393,6 +1471,10 @@ pub struct AppState {
     pub pane_borders: bool,
     pub pane_gaps: bool,
     pub show_agent_labels_on_pane_borders: bool,
+    pub border_style: crate::config::BorderStyle,
+    pub tab_chrome: TabChromeStyle,
+    pub chrome_dark: ChromeColors,
+    pub chrome_light: ChromeColors,
     pub hide_tab_bar_when_single_tab: bool,
     pub pane_history_persistence: bool,
     /// Expose the focused pane's cursor anchor to the outer terminal even when
@@ -1751,6 +1833,10 @@ impl AppState {
             pane_borders: true,
             pane_gaps: false,
             show_agent_labels_on_pane_borders: false,
+            border_style: crate::config::BorderStyle::Rounded,
+            tab_chrome: TabChromeStyle::default(),
+            chrome_dark: ChromeColors::default(),
+            chrome_light: ChromeColors::default(),
             hide_tab_bar_when_single_tab: false,
             pane_history_persistence: false,
             reveal_hidden_cursor_for_cjk_ime: false,
@@ -2199,6 +2285,20 @@ mod tests {
                 "theme should resolve: {name}"
             );
         }
+    }
+
+    #[test]
+    fn telemetry_and_my_light_resolve() {
+        use ratatui::style::Color;
+        assert_eq!(Palette::from_name("telemetry"), Some(Palette::telemetry()));
+        assert_eq!(Palette::from_name("my-light"), Some(Palette::my_light()));
+        assert_eq!(Palette::from_name("mylight"), Some(Palette::my_light()));
+        assert_eq!(Palette::telemetry().accent, Color::Rgb(0xF4, 0xAE, 0x59));
+        assert_eq!(Palette::telemetry().panel_bg, Color::Rgb(0x22, 0x2a, 0x32));
+        assert_eq!(Palette::my_light().accent, Color::Rgb(0x00, 0x8e, 0xc4));
+        assert_eq!(Palette::my_light().panel_bg, Color::Rgb(0xee, 0xee, 0xee));
+        assert!(THEME_NAMES.contains(&"telemetry"));
+        assert!(THEME_NAMES.contains(&"my-light"));
     }
 
     #[test]
