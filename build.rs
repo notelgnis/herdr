@@ -58,10 +58,19 @@ fn main() {
         .to_string();
 
     let zig = env::var("ZIG").unwrap_or_else(|_| "zig".into());
+    // Install the zig artifact into this profile's OUT_DIR instead of the
+    // shared vendor/zig-out directory. A shared install dir let a Debug-mode
+    // lib (built via LIBGHOSTTY_VT_OPTIMIZE=Debug for dev iteration) get
+    // linked into later release binaries whose build script didn't rerun,
+    // shipping ghostty's slow_runtime_safety integrity checks — a full page
+    // verification on every terminal write — into production builds.
+    let zig_prefix = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")).join("libghostty-vt");
     let mut command = Command::new(zig);
     command
         .arg("build")
         .arg("-Demit-lib-vt")
+        .arg("--prefix")
+        .arg(&zig_prefix)
         .arg(format!("-Doptimize={optimize}"))
         .arg(format!("-Dsimd={simd}"))
         .arg(format!("-Dtarget={zig_target}"))
@@ -80,7 +89,7 @@ fn main() {
         "zig build for vendored libghostty-vt failed: {status}"
     );
 
-    let lib_dir = vendored_dir.join("zig-out/lib");
+    let lib_dir = zig_prefix.join("lib");
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     if target.contains("apple-darwin") {
         let static_lib = lib_dir.join("libghostty-vt.a");

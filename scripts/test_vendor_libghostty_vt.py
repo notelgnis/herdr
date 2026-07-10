@@ -110,6 +110,26 @@ class VendorLibghosttyVtTests(unittest.TestCase):
         self.assertIn('.logFn = @import("terminal/c/sys.zig").logFn', lib_text)
         self.assertIn("if (global.log == null) return;", sys_text)
 
+    def test_build_script_isolates_zig_artifact_per_cargo_profile(self) -> None:
+        """The zig artifact must install into the per-profile OUT_DIR.
+
+        A shared vendor/libghostty-vt/zig-out install dir once let a
+        Debug-mode lib (built via LIBGHOSTTY_VT_OPTIMIZE=Debug for dev
+        iteration, with ghostty's slow_runtime_safety full-page integrity
+        checks) get linked into release binaries whose build script did not
+        rerun, driving the server to sustained 100%+ CPU under agent load.
+        """
+        project_root = Path(__file__).resolve().parent.parent
+        build_rs = (project_root / "build.rs").read_text(encoding="utf-8")
+        self.assertIn('env::var("OUT_DIR")', build_rs)
+        self.assertIn('"--prefix"', build_rs)
+        self.assertNotIn(
+            'join("zig-out',
+            build_rs,
+            "build.rs must not read the shared vendor zig-out directory; "
+            "install and link the zig artifact from the per-profile OUT_DIR",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
