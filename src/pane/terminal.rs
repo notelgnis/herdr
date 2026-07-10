@@ -121,10 +121,189 @@ pub(crate) struct GhosttyPaneTerminal {
     pending_pty_responses: Arc<Mutex<Vec<Bytes>>>,
 }
 
+/// Retained cell buffer for the full render path.
+///
+/// Ghostty tracks per-row dirty state that is consumed by `render()` and
+/// `ghostty_collect_dirty_patch`. Both consumers write the rows they read into
+/// this cache, so between renders it mirrors the last observed pane content.
+/// Full renders then only pay per-cell FFI reads for rows that actually
+/// changed; unchanged panes blit from the cache. The cache is invalidated on
+/// size or resolved-color changes (theme switches, OSC 10/11) and on any FFI
+/// read error, in which case dirty bits are left set so the next render
+/// recovers with a full walk.
+#[derive(Default)]
+struct PaneRenderCache {
+    cells: Vec<ratatui::buffer::Cell>,
+    width: u16,
+    height: u16,
+    rows_rendered: u16,
+    default_fg: Option<Color>,
+    default_bg: Option<Color>,
+    resolved_fg: Option<Color>,
+    resolved_bg: Option<Color>,
+    hide_kitty_placeholders: bool,
+    valid: bool,
+}
+
+impl PaneRenderCache {
+    #[allow(clippy::too_many_arguments)] // mirrors the resolved render inputs
+    fn compatible(
+        &self,
+        width: u16,
+        height: u16,
+        default_fg: Option<Color>,
+        default_bg: Option<Color>,
+        resolved_fg: Option<Color>,
+        resolved_bg: Option<Color>,
+        hide_kitty_placeholders: bool,
+    ) -> bool {
+        self.valid
+            && self.width == width
+            && self.height == height
+            && self.default_fg == default_fg
+            && self.default_bg == default_bg
+            && self.resolved_fg == resolved_fg
+            && self.resolved_bg == resolved_bg
+            && self.hide_kitty_placeholders == hide_kitty_placeholders
+    }
+
+    fn invalidate(&mut self) {
+        self.valid = false;
+    }
+
+    #[allow(clippy::too_many_arguments)] // mirrors the resolved render inputs
+    fn reset_for(
+        &mut self,
+        width: u16,
+        height: u16,
+        default_fg: Option<Color>,
+        default_bg: Option<Color>,
+        resolved_fg: Option<Color>,
+        resolved_bg: Option<Color>,
+        hide_kitty_placeholders: bool,
+    ) {
+        self.width = width;
+        self.height = height;
+        self.default_fg = default_fg;
+        self.default_bg = default_bg;
+        self.resolved_fg = resolved_fg;
+        self.resolved_bg = resolved_bg;
+        self.hide_kitty_placeholders = hide_kitty_placeholders;
+        self.reset_cells();
+    }
+
+    /// Refills the cell buffer with blank cells (matching `ghostty_reset_cell`
+    /// semantics for the cached default colors), keeping the cached metadata.
+    fn reset_cells(&mut self) {
+        let mut blank = ratatui::buffer::Cell::default();
+        ghostty_reset_cell(&mut blank, self.default_fg, self.default_bg);
+        self.rows_rendered = 0;
+        self.valid = false;
+        self.cells.clear();
+        self.cells
+            .resize(usize::from(self.width) * usize::from(self.height), blank);
+    }
+
+    fn cell_mut(&mut self, x: u16, y: u16) -> &mut ratatui::buffer::Cell {
+        &mut self.cells[usize::from(y) * usize::from(self.width) + usize::from(x)]
+    }
+}
+
+/// Walks the render-state rows into `cache`, reading only ghostty-flagged
+/// dirty rows when `dirty_only` is set. Rows beyond the walked region keep the
+/// blank cells `reset_cells` installed. Returns false on any FFI error, in
+/// which case the caller must invalidate the cache and leave dirty bits set.
+fn ghostty_walk_rows_into_cache(
+    render_state: &mut crate::ghostty::RenderState,
+    cache: &mut PaneRenderCache,
+    area: Rect,
+    dirty_only: bool,
+) -> bool {
+    let default_fg = cache.default_fg;
+    let default_bg = cache.default_bg;
+    let resolved_fg = cache.resolved_fg;
+    let resolved_bg = cache.resolved_bg;
+    let hide_kitty_placeholders = cache.hide_kitty_placeholders;
+    let Ok(mut row_iterator) = crate::ghostty::RowIterator::new() else {
+        return false;
+    };
+    let Ok(mut row_cells) = crate::ghostty::RowCells::new() else {
+        return false;
+    };
+    let rows_walked = {
+        let Ok(mut rows) = render_state.populate_row_iterator(&mut row_iterator) else {
+            return false;
+        };
+        let mut grapheme_codepoints = Vec::new();
+        let mut symbol_scratch = String::new();
+        let mut y = 0u16;
+        while y < area.height && rows.next() {
+            // Re-read every row on full walks; on dirty walks only rows
+            // ghostty flagged (treat dirty-read errors as dirty so cached
+            // content can't go stale).
+            let reread = !dirty_only || rows.dirty().unwrap_or(true);
+            if reread {
+                let Ok(mut cells) = rows.populate_cells(&mut row_cells) else {
+                    return false;
+                };
+                let mut x = 0u16;
+                while x < area.width && cells.next() {
+                    let basic = cells.basic_data().unwrap_or_default();
+                    let style = ghostty_cell_style(
+                        &cells,
+                        &basic,
+                        default_fg,
+                        default_bg,
+                        resolved_fg,
+                        resolved_bg,
+                    );
+                    let symbol = match ghostty_buffer_symbol_into(
+                        &cells,
+                        basic.wide,
+                        hide_kitty_placeholders,
+                        &mut grapheme_codepoints,
+                        &mut symbol_scratch,
+                    ) {
+                        Ok(symbol) => symbol,
+                        Err(_) => {
+                            symbol_scratch.clear();
+                            symbol_scratch.push_str(ghostty_blank_symbol_for_width(basic.wide));
+                            symbol_scratch.as_str()
+                        }
+                    };
+                    let cell = cache.cell_mut(x, y);
+                    cell.reset();
+                    cell.set_symbol(symbol);
+                    cell.set_style(style);
+                    x += 1;
+                }
+                while x < area.width {
+                    ghostty_reset_cell(cache.cell_mut(x, y), default_fg, default_bg);
+                    x += 1;
+                }
+            }
+            y += 1;
+        }
+        y
+    };
+    if dirty_only {
+        if rows_walked != cache.rows_rendered {
+            // Rows appeared or disappeared without a full-dirty signal; redo as
+            // a full walk so stale cached rows can't survive.
+            cache.reset_cells();
+            return ghostty_walk_rows_into_cache(render_state, cache, area, false);
+        }
+    } else {
+        cache.rows_rendered = rows_walked;
+    }
+    true
+}
+
 pub(crate) struct GhosttyPaneCore {
     pub terminal: crate::ghostty::Terminal,
     #[cfg(windows)]
     recent_fallback: windows_recent_fallback::Cache,
+    render_cache: PaneRenderCache,
     pub render_state: crate::ghostty::RenderState,
     pub kitty_keyboard: KittyKeyboardTracker,
     pub initial_default_foreground: Option<crate::ghostty::RgbColor>,
@@ -386,6 +565,7 @@ impl GhosttyPaneTerminal {
                 terminal,
                 #[cfg(windows)]
                 recent_fallback: windows_recent_fallback::Cache::default(),
+                render_cache: PaneRenderCache::default(),
                 render_state,
                 kitty_keyboard: KittyKeyboardTracker::default(),
                 initial_default_foreground,
@@ -1215,6 +1395,7 @@ impl GhosttyPaneTerminal {
             terminal,
             render_state,
             decscusr_tracker,
+            render_cache,
             ..
         } = &mut *core;
         if render_state.update(terminal).is_err() {
@@ -1229,76 +1410,68 @@ impl GhosttyPaneTerminal {
         let resolved_bg = colors.map(|c| ghostty_color(c.background));
         let hide_kitty_placeholders = crate::kitty_graphics::is_enabled();
 
-        let mut row_iterator = match crate::ghostty::RowIterator::new() {
-            Ok(iterator) => iterator,
-            Err(_) => return,
+        let compatible = render_cache.compatible(
+            area.width,
+            area.height,
+            default_fg,
+            default_bg,
+            resolved_fg,
+            resolved_bg,
+            hide_kitty_placeholders,
+        );
+        let walk_dirty_only = if !compatible {
+            Some(false)
+        } else {
+            match render_state.dirty() {
+                Ok(crate::ghostty::Dirty::Clean) => None,
+                Ok(crate::ghostty::Dirty::Partial) => Some(true),
+                Ok(crate::ghostty::Dirty::Full) | Err(_) => Some(false),
+            }
         };
-        let mut row_cells = match crate::ghostty::RowCells::new() {
-            Ok(cells) => cells,
-            Err(_) => return,
-        };
-        {
-            let buf = frame.buffer_mut();
-            let mut rows = match render_state.populate_row_iterator(&mut row_iterator) {
-                Ok(rows) => rows,
-                Err(_) => return,
-            };
-            let mut grapheme_codepoints = Vec::new();
-            let mut symbol_scratch = String::new();
-            let mut y = 0u16;
-            while y < area.height && rows.next() {
-                let mut cells = match rows.populate_cells(&mut row_cells) {
-                    Ok(cells) => cells,
-                    Err(_) => break,
-                };
-                let mut x = 0u16;
-                while x < area.width && cells.next() {
-                    let basic = cells.basic_data().unwrap_or_default();
-                    let style = ghostty_cell_style(
-                        &cells,
-                        &basic,
+
+        match walk_dirty_only {
+            None => crate::render_prof::event("pane_render.cache_clean"),
+            Some(dirty_only) => {
+                if dirty_only {
+                    crate::render_prof::event("pane_render.walk_dirty");
+                } else {
+                    crate::render_prof::event("pane_render.walk_full");
+                    render_cache.reset_for(
+                        area.width,
+                        area.height,
                         default_fg,
                         default_bg,
                         resolved_fg,
                         resolved_bg,
-                    );
-                    let symbol = match ghostty_buffer_symbol_into(
-                        &cells,
-                        basic.wide,
                         hide_kitty_placeholders,
-                        &mut grapheme_codepoints,
-                        &mut symbol_scratch,
-                    ) {
-                        Ok(symbol) => symbol,
-                        Err(_) => {
-                            symbol_scratch.clear();
-                            symbol_scratch.push_str(ghostty_blank_symbol_for_width(basic.wide));
-                            symbol_scratch.as_str()
-                        }
-                    };
-                    let cell = &mut buf[(area.x + x, area.y + y)];
-                    cell.reset();
-                    cell.set_symbol(symbol);
-                    cell.set_style(style);
-                    x += 1;
+                    );
                 }
-                while x < area.width {
-                    let cell = &mut buf[(area.x + x, area.y + y)];
-                    ghostty_reset_cell(cell, default_fg, default_bg);
-                    x += 1;
+                if ghostty_walk_rows_into_cache(render_state, render_cache, area, dirty_only) {
+                    render_cache.valid = true;
+                    ghostty_clear_render_dirty(render_state, area.height);
+                } else {
+                    // FFI read error mid-walk: leave dirty bits set and drop the
+                    // cache so the next render recovers with a full walk.
+                    crate::render_prof::event("pane_render.walk_error");
+                    render_cache.invalidate();
                 }
-                y += 1;
-            }
-            while y < area.height {
-                for x in 0..area.width {
-                    let cell = &mut buf[(area.x + x, area.y + y)];
-                    ghostty_reset_cell(cell, default_fg, default_bg);
-                }
-                y += 1;
             }
         }
 
-        ghostty_clear_render_dirty(render_state, area.height);
+        // Blit whatever the cache holds, even after a failed walk: a torn
+        // frame (mix of freshly walked and last-render rows) beats a blank
+        // pane, and the un-cleared dirty bits make the next render redo a
+        // full walk. The pre-cache code behaved worse on the same FFI errors:
+        // it rendered partial rows plus a blank tail and still cleared the
+        // dirty state.
+        if render_cache.width == area.width && render_cache.height == area.height {
+            let buf = frame.buffer_mut();
+            for y in 0..area.height {
+                for x in 0..area.width {
+                    buf[(area.x + x, area.y + y)] = render_cache.cell_mut(x, y).clone();
+                }
+            }
+        }
 
         let current_cursor = cursor_state_from_render_state(render_state, decscusr_tracker);
         if show_cursor {
@@ -1467,6 +1640,7 @@ fn ghostty_collect_dirty_patch(
     let GhosttyPaneCore {
         terminal,
         render_state,
+        render_cache,
         ..
     } = core;
     if render_state.update(terminal).is_err() {
@@ -1487,6 +1661,23 @@ fn ghostty_collect_dirty_patch(
     let resolved_fg = colors.map(|c| ghostty_color(c.foreground));
     let resolved_bg = colors.map(|c| ghostty_color(c.background));
     let hide_kitty_placeholders = crate::kitty_graphics::is_enabled();
+
+    // This path consumes the same per-row dirty bits the render cache relies
+    // on, so mirror every patched row into the cache; if the cache doesn't
+    // match the current geometry/colors, drop it instead so the next full
+    // render re-walks everything.
+    let cache_apply = render_cache.compatible(
+        area_width,
+        area_height,
+        default_fg,
+        default_bg,
+        resolved_fg,
+        resolved_bg,
+        hide_kitty_placeholders,
+    );
+    if !cache_apply {
+        render_cache.invalidate();
+    }
 
     let Ok(mut row_iterator) = crate::ghostty::RowIterator::new() else {
         fallback!("row_iterator_new_error");
@@ -1541,16 +1732,31 @@ fn ghostty_collect_dirty_patch(
                     Ok(symbol) => symbol.to_owned(),
                     Err(_) => ghostty_blank_symbol_for_width(basic.wide).to_owned(),
                 };
+                if cache_apply {
+                    let cell = render_cache.cell_mut(x, y);
+                    cell.reset();
+                    cell.set_symbol(&symbol);
+                    cell.set_style(style);
+                }
                 patch_cells.push(cell_data_from_style(symbol, style));
                 x += 1;
             }
             while x < area_width {
+                if cache_apply {
+                    ghostty_reset_cell(render_cache.cell_mut(x, y), default_fg, default_bg);
+                }
                 patch_cells.push(blank_cell_data(default_fg, default_bg));
                 x += 1;
             }
             patch_rows.push((y, patch_cells));
         }
         y += 1;
+    }
+
+    // A yielded-row-count change without a full-dirty signal means cached rows
+    // beyond the walked region could be stale; drop the cache defensively.
+    if cache_apply && y != render_cache.rows_rendered {
+        render_cache.invalidate();
     }
 
     let dirty_ys: std::collections::HashSet<u16> = patch_rows.iter().map(|(row, _)| *row).collect();
@@ -3548,6 +3754,149 @@ mod tests {
         let buffer = terminal.backend().buffer();
         let row = (0..16).map(|x| buffer[(x, 0)].symbol()).collect::<String>();
         assert_eq!(row, "restored history");
+    }
+
+    fn render_to_buffer(
+        pane: &GhosttyPaneTerminal,
+        width: u16,
+        height: u16,
+    ) -> ratatui::buffer::Buffer {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, width, height), false))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn cached_render_matches_fresh_render_across_incremental_writes() {
+        let (tx, _rx) = mpsc::channel(4);
+        // Second chunk rewrites row 1 with shorter content, exercising the
+        // x-tail blanking of the dirty-rows cache walk.
+        let first: &[u8] = b"\x1b[31mred line\x1b[0m\r\nlonger second line";
+        let second: &[u8] = b"\r\x1b[Kshort\r\nthird";
+
+        let cached = {
+            let terminal = crate::ghostty::Terminal::new(20, 5, 100).unwrap();
+            let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+            pane.core.lock().unwrap().terminal.write(first);
+            let _ = render_to_buffer(&pane, 20, 5);
+            pane.core.lock().unwrap().terminal.write(second);
+            render_to_buffer(&pane, 20, 5)
+        };
+        let fresh = {
+            let terminal = crate::ghostty::Terminal::new(20, 5, 100).unwrap();
+            let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+            {
+                let mut core = pane.core.lock().unwrap();
+                core.terminal.write(first);
+                core.terminal.write(second);
+            }
+            render_to_buffer(&pane, 20, 5)
+        };
+
+        let row0 = (0..8).map(|x| cached[(x, 0)].symbol()).collect::<String>();
+        assert_eq!(row0, "red line");
+        assert_eq!(cached, fresh);
+    }
+
+    #[test]
+    fn render_after_dirty_patch_collection_stays_coherent() {
+        let (tx, _rx) = mpsc::channel(4);
+        let first: &[u8] = b"hello";
+        let second: &[u8] = b"\r\nworld";
+
+        let cached = {
+            let terminal = crate::ghostty::Terminal::new(20, 5, 100).unwrap();
+            let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+            pane.core.lock().unwrap().terminal.write(first);
+            let _ = render_to_buffer(&pane, 20, 5);
+            pane.core.lock().unwrap().terminal.write(second);
+            // The retained client path consumes the dirty rows; the render
+            // cache must be updated alongside the emitted patch.
+            let outcome = pane.collect_dirty_patch(20, 5);
+            assert!(
+                matches!(outcome, TerminalDirtyPatchOutcome::Patch(_)),
+                "expected dirty patch, got {outcome:?}"
+            );
+            render_to_buffer(&pane, 20, 5)
+        };
+        let fresh = {
+            let terminal = crate::ghostty::Terminal::new(20, 5, 100).unwrap();
+            let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+            {
+                let mut core = pane.core.lock().unwrap();
+                core.terminal.write(first);
+                core.terminal.write(second);
+            }
+            render_to_buffer(&pane, 20, 5)
+        };
+
+        let row1 = (0..5).map(|x| cached[(x, 1)].symbol()).collect::<String>();
+        assert_eq!(row1, "world");
+        assert_eq!(cached, fresh);
+    }
+
+    #[test]
+    fn render_cache_invalidated_on_host_theme_change() {
+        let (tx, _rx) = mpsc::channel(4);
+        let content: &[u8] = b"themed";
+        let theme = crate::terminal_theme::TerminalTheme {
+            foreground: Some(crate::terminal_theme::RgbColor {
+                r: 10,
+                g: 20,
+                b: 30,
+            }),
+            background: Some(crate::terminal_theme::RgbColor {
+                r: 250,
+                g: 250,
+                b: 240,
+            }),
+        };
+
+        let cached = {
+            let terminal = crate::ghostty::Terminal::new(20, 5, 100).unwrap();
+            let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+            pane.core.lock().unwrap().terminal.write(content);
+            let _ = render_to_buffer(&pane, 20, 5);
+            pane.core.lock().unwrap().host_terminal_theme = theme;
+            render_to_buffer(&pane, 20, 5)
+        };
+        let fresh = {
+            let terminal = crate::ghostty::Terminal::new(20, 5, 100).unwrap();
+            let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+            {
+                let mut core = pane.core.lock().unwrap();
+                core.host_terminal_theme = theme;
+                core.terminal.write(content);
+            }
+            render_to_buffer(&pane, 20, 5)
+        };
+
+        assert_eq!(cached, fresh);
+    }
+
+    #[test]
+    fn render_cache_handles_area_resize() {
+        let (tx, _rx) = mpsc::channel(4);
+        let content: &[u8] = b"resize me\r\nsecond row";
+
+        let cached = {
+            let terminal = crate::ghostty::Terminal::new(20, 5, 100).unwrap();
+            let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+            pane.core.lock().unwrap().terminal.write(content);
+            let _ = render_to_buffer(&pane, 20, 5);
+            render_to_buffer(&pane, 12, 3)
+        };
+        let fresh = {
+            let terminal = crate::ghostty::Terminal::new(20, 5, 100).unwrap();
+            let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+            pane.core.lock().unwrap().terminal.write(content);
+            render_to_buffer(&pane, 12, 3)
+        };
+
+        assert_eq!(cached, fresh);
     }
 
     #[test]
