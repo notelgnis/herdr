@@ -4,7 +4,7 @@ use crate::config;
 use crate::detect::AgentState;
 use crate::layout::PaneId;
 use crate::protocol;
-use crate::terminal::TerminalRuntimeRegistry;
+use crate::terminal::{TerminalId, TerminalRuntimeRegistry};
 
 pub(crate) fn should_forward_toast_to_clients(delivery: config::ToastDelivery) -> bool {
     toast_notify_kind(delivery).is_some()
@@ -27,33 +27,80 @@ pub(crate) fn toast_message_from_state_change(
     new_state: AgentState,
     previous_agent_label: Option<&str>,
 ) -> Option<String> {
-    state
-        .workspaces
-        .iter()
-        .enumerate()
-        .find_map(|(ws_idx, ws)| {
-            ws.tabs.iter().find_map(|tab| {
-                let pane = tab.panes.get(&pane_id)?;
-                let agent_label = state
-                    .terminals
-                    .get(&pane.attached_terminal_id)
-                    .and_then(|terminal| terminal.effective_agent_label())?;
-                let kind = app::actions::notification_toast_for_state_change_with_agent_labels(
-                    suppress_active_tab_notifications,
-                    prev_state,
-                    new_state,
-                    previous_agent_label,
-                    Some(agent_label),
-                )?;
-                let workspace_label = ws.display_name_from(&state.terminals, terminal_runtimes);
-                Some(format!(
-                    "{} {}: {}",
-                    agent_label,
-                    toast_event_text(kind),
-                    app::actions::notification_context(ws, &workspace_label, ws_idx, pane_id)
-                ))
-            })
+    state.workspaces.iter().find_map(|ws| {
+        ws.tabs.iter().find_map(|tab| {
+            let pane = tab.panes.get(&pane_id)?;
+            let agent_label = state
+                .terminals
+                .get(&pane.attached_terminal_id)
+                .and_then(|terminal| terminal.effective_agent_label())?;
+            let kind = app::actions::notification_toast_for_state_change_with_agent_labels(
+                suppress_active_tab_notifications,
+                prev_state,
+                new_state,
+                previous_agent_label,
+                Some(agent_label),
+            )?;
+            let workspace_label = ws.display_name_from(&state.terminals, terminal_runtimes);
+            let context = forwarded_notification_context(
+                workspace_label,
+                terminal_runtimes,
+                &pane.attached_terminal_id,
+            );
+            Some(format!(
+                "{} {}: {}",
+                agent_label,
+                toast_event_text(kind),
+                context
+            ))
         })
+    })
+}
+
+/// Body for a forwarded desktop notification (Terminal/System delivery).
+///
+/// Favors the agent's own terminal title (e.g. Claude Code sets it to a summary
+/// of the current task) and falls back to the workspace label. Unlike the
+/// in-app toast, it omits the sidebar ordinal, which is meaningless in a desktop
+/// notification. This is used for every forwarded path (immediate and delayed);
+/// the numbered [`app::actions::notification_context`] is reserved for the
+/// in-app Herdr toast rendered in the sidebar.
+pub(crate) fn forwarded_notification_context(
+    workspace_label: String,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    terminal_id: &TerminalId,
+) -> String {
+    let osc_title = terminal_runtimes
+        .get(terminal_id)
+        .map(|runtime| runtime.agent_osc_title())
+        .unwrap_or_default();
+    clean_agent_osc_title(&osc_title, &workspace_label).unwrap_or(workspace_label)
+}
+
+/// Turn an agent's raw OSC 0/2 terminal title into a notification-worthy task
+/// label, or `None` when the title carries no useful task information.
+///
+/// Agents prepend a status marker to the title (a `✳` idle glyph or a braille
+/// spinner frame while working); that glyph is stripped. Titles that are empty,
+/// the bare agent name, or just the project label (Codex sets the title to the
+/// folder name) are rejected so the caller falls back to the project label.
+fn clean_agent_osc_title(raw: &str, project: &str) -> Option<String> {
+    let mut title = raw.trim();
+    if let Some(first) = title.chars().next() {
+        let is_status_glyph = first == '✳' || ('\u{2800}'..='\u{28FF}').contains(&first);
+        if is_status_glyph {
+            title = title[first.len_utf8()..].trim_start();
+        }
+    }
+    let title = title.trim();
+    if title.is_empty()
+        || title.eq_ignore_ascii_case(project)
+        || title.eq_ignore_ascii_case("claude code")
+        || title.eq_ignore_ascii_case("codex")
+    {
+        return None;
+    }
+    Some(title.to_owned())
 }
 
 fn toast_event_text(kind: app::state::ToastKind) -> &'static str {
@@ -144,14 +191,37 @@ mod tests {
             Some("codex"),
         );
 
+        // No OSC title is set on the runtime, so the body falls back to the live
+        // workspace label with no sidebar ordinal.
         assert_eq!(
             message.as_deref(),
-            Some("codex finished: __herdr_projects__ · 1")
+            Some("codex finished: __herdr_projects__")
         );
 
         for (_, runtime) in terminal_runtimes.drain() {
             runtime.shutdown();
         }
         let _ = std::fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn clean_agent_osc_title_strips_status_glyphs() {
+        assert_eq!(
+            super::clean_agent_osc_title("✳ Explain design skills capabilities", "ScoreFlow"),
+            Some("Explain design skills capabilities".to_owned())
+        );
+        assert_eq!(
+            super::clean_agent_osc_title("⠐ Customize Herdr UI like Zellij", "herdr"),
+            Some("Customize Herdr UI like Zellij".to_owned())
+        );
+    }
+
+    #[test]
+    fn clean_agent_osc_title_rejects_uninformative_titles() {
+        // Fresh Claude Code panes advertise the bare agent name.
+        assert_eq!(super::clean_agent_osc_title("✳ Claude Code", "herdr"), None);
+        // Codex sets the title to the project folder, which is redundant.
+        assert_eq!(super::clean_agent_osc_title("herdr", "herdr"), None);
+        assert_eq!(super::clean_agent_osc_title("   ", "herdr"), None);
     }
 }

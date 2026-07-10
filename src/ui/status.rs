@@ -24,9 +24,10 @@ pub(crate) fn copy_feedback_rect(
         return Rect::default();
     }
 
-    let content_width = feedback.message.len() as u16 + 4;
+    // Borderless single-line chip: " ● <message> ".
+    let content_width = display_width_u16(&feedback.message) + 4;
     let width = content_width.min(area.width);
-    let height = 3u16.min(area.height);
+    let height = 1u16.min(area.height);
     let x = match position {
         ToastClipboardPosition::TopLeft | ToastClipboardPosition::BottomLeft => area.x,
         ToastClipboardPosition::TopCenter | ToastClipboardPosition::BottomCenter => {
@@ -141,30 +142,22 @@ pub(super) fn render_copy_feedback(
         return;
     }
 
+    // Subtle, borderless chip that matches the muted UI language: a small
+    // success dot and de-emphasized text on the panel background, no border and
+    // no bold weight.
     frame.render_widget(Clear, feedback_area);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(p.green))
-        .style(Style::default().bg(p.panel_bg));
-    let inner = block.inner(feedback_area);
-    frame.render_widget(block, feedback_area);
-
-    if inner.height == 0 {
-        return;
-    }
-
     let text = Line::from(vec![
-        Span::styled("●", Style::default().fg(p.green).bg(p.panel_bg)),
-        Span::raw(" "),
+        Span::styled(" ● ", Style::default().fg(p.green).bg(p.panel_bg)),
         Span::styled(
             &feedback.message,
-            Style::default()
-                .fg(p.text)
-                .bg(p.panel_bg)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(p.overlay1).bg(p.panel_bg),
         ),
+        Span::styled(" ", Style::default().bg(p.panel_bg)),
     ]);
-    frame.render_widget(Paragraph::new(text), inner);
+    frame.render_widget(
+        Paragraph::new(text).style(Style::default().bg(p.panel_bg)),
+        feedback_area,
+    );
 }
 
 pub(super) fn render_config_diagnostic(frame: &mut Frame, area: Rect, message: &str, p: &Palette) {

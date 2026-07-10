@@ -57,7 +57,8 @@ use crate::server::clients::{
 };
 use crate::server::keybindings::{app_keybindings, apply_keybindings};
 use crate::server::notifications::{
-    should_forward_toast_to_clients, toast_message_from_state_change, toast_notify_kind,
+    forwarded_notification_context, should_forward_toast_to_clients,
+    toast_message_from_state_change, toast_notify_kind,
 };
 use crate::server::socket_paths::{
     client_socket_path, prepare_socket_path, restrict_socket_permissions,
@@ -1639,12 +1640,14 @@ impl HeadlessServer {
         };
         let workspace_label =
             ws.display_name_from(&self.app.state.terminals, &self.app.terminal_runtimes);
-        let context = crate::app::actions::notification_context(
-            ws,
-            &workspace_label,
-            update.ws_idx,
-            update.pane_id,
-        );
+        let context = match ws.terminal_id(update.pane_id) {
+            Some(terminal_id) => forwarded_notification_context(
+                workspace_label,
+                &self.app.terminal_runtimes,
+                terminal_id,
+            ),
+            None => workspace_label,
+        };
         self.send_notify_to_foreground_client(
             toast_notify_kind(self.app.state.toast_config.delivery)
                 .expect("toast forwarding requires a client notification kind"),
@@ -1667,12 +1670,30 @@ impl HeadlessServer {
 
         if should_forward_toast_to_clients(self.app.state.toast_config.delivery) {
             if let Some(toast) = &delivery.client_notification {
-                self.send_notify_to_foreground_client(
-                    toast_notify_kind(self.app.state.toast_config.delivery)
-                        .expect("toast forwarding requires a client notification kind"),
-                    &toast.title,
-                    non_empty_body(&toast.context),
-                );
+                let body = self
+                    .app
+                    .state
+                    .workspaces
+                    .iter()
+                    .find(|ws| ws.id == delivery.workspace_id)
+                    .and_then(|ws| {
+                        let workspace_label = ws.display_name_from(
+                            &self.app.state.terminals,
+                            &self.app.terminal_runtimes,
+                        );
+                        ws.terminal_id(delivery.pane_id).map(|terminal_id| {
+                            forwarded_notification_context(
+                                workspace_label,
+                                &self.app.terminal_runtimes,
+                                terminal_id,
+                            )
+                        })
+                    })
+                    .unwrap_or_else(|| toast.context.clone());
+                let kind = toast_notify_kind(self.app.state.toast_config.delivery)
+                    .expect("toast forwarding requires a client notification kind");
+                let title = toast.title.clone();
+                self.send_notify_to_foreground_client(kind, title, non_empty_body(&body));
             }
         }
     }
@@ -3012,11 +3033,10 @@ impl HeadlessServer {
                             &self.app.state.terminals,
                             &self.app.terminal_runtimes,
                         );
-                        let context = crate::app::actions::notification_context(
-                            &self.app.state.workspaces[*ws_idx],
-                            &workspace_label,
-                            *ws_idx,
-                            *pane_id,
+                        let context = forwarded_notification_context(
+                            workspace_label,
+                            &self.app.terminal_runtimes,
+                            &pane_after.attached_terminal_id,
                         );
                         self.send_notify_to_foreground_client(
                             toast_notify_kind(self.app.state.toast_config.delivery)
@@ -8436,7 +8456,10 @@ next_tab = ""
             } => {
                 assert_eq!(kind, protocol::NotifyKind::SystemToast);
                 assert_eq!(message, "pi needs attention");
-                assert_eq!(body.as_deref(), Some("background · 1"));
+                // Desktop notifications use the agent's task title, falling back
+                // to the workspace label with no sidebar ordinal (no OSC title is
+                // set on the test runtime).
+                assert_eq!(body.as_deref(), Some("background"));
             }
             other => panic!("expected delayed system toast, got {other:?}"),
         }
@@ -8524,7 +8547,8 @@ next_tab = ""
             } => {
                 assert_eq!(kind, protocol::NotifyKind::SystemToast);
                 assert_eq!(message, "pi needs attention");
-                assert_eq!(body.as_deref(), Some("active · 1"));
+                // Ordinal intentionally dropped from the desktop notification body.
+                assert_eq!(body.as_deref(), Some("active"));
             }
             other => panic!("expected delayed system toast, got {other:?}"),
         }
