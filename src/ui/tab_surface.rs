@@ -302,9 +302,13 @@ mod tests {
         assert!(!app.view.split_borders.is_empty());
         assert!(frame.cursor.is_some());
         assert_eq!(frame.hyperlinks, vec![uri.to_owned()]);
+        // Fork note: this digest pins the fork's default chrome (rounded tab
+        // caps, rounded pane borders, custom chrome colors) and differs from
+        // upstream's stock-chrome digest. Re-pin it when chrome defaults
+        // change intentionally.
         assert_eq!(
             frame_digest(&frame),
-            "ce383feeaac30922502b7c4f8af53b5ca30e816ec4503ca6d015738b584da487"
+            "0bbde07536b012b547eef34cdf78ffa1812772d4a8d90ca9d90ba4bd02d7cd31"
         );
     }
 
